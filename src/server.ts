@@ -2,12 +2,12 @@ import Fastify from 'fastify';
 import { WebSocketServer, WebSocket } from 'ws';
 import { v4 as uuidv4 } from 'uuid';
 import { createRequire } from 'module';
-import { URLSearchParams } from 'url';
 
 const require = createRequire(import.meta.url);
 const IORedis = require("ioredis");
 
-import { orderQueue, redisConfig } from './redis.js';
+import { redisConfig } from './config/redis.js';
+import { orderQueue, defaultJobOptions } from './lib/queue.js';
 
 const server = Fastify({ logger: true });
 const wss = new WebSocketServer({ noServer: true });
@@ -60,10 +60,7 @@ wss.on('connection', async (ws: WebSocket, request) => {
             inputToken,
             outputToken,
             amount,
-        }, {
-            attempts: 3,
-            backoff: { type: 'exponential', delay: 1000 },
-        });
+        }, defaultJobOptions); // <-- The change is here
 
         console.log(`[API] Added job for order ${orderId} to the queue.`);
         ws.send(JSON.stringify({
@@ -87,15 +84,17 @@ wss.on('connection', async (ws: WebSocket, request) => {
     });
 });
 
+console.log('[API] Creating Redis subscriber...');
 const subscriber = new IORedis(redisConfig);
-subscriber.subscribe('order-updates', (err: string) => {
+
+subscriber.subscribe('order-updates', (err: any) => {
     if (err) {
         console.error('[API] Failed to subscribe to order-updates', err);
         process.exit(1);
-    } else {
-        console.log('[API] Subscribed to order-updates channel.');
     }
+    console.log('[API] Subscribed to order-updates channel successfully.');
 });
+
 
 subscriber.on('message', (channel: any, message: any) => {
     if (channel === 'order-updates') {

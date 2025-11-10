@@ -1,34 +1,61 @@
 import { Worker, Job } from 'bullmq';
-import { redisConfig, publisher } from './redis.js';
-import { MockDexRouter } from './router/mockDexRouter.js';
+import { redisConfig } from './config/redis.js';
+import { MockDexRouter } from './dex/mockDexRouter.js';
+import { createRequire } from 'module';
 import { prisma } from './db.js';
 
+const require = createRequire(import.meta.url);
+const IORedis = require("ioredis");
+
 console.log('[WORKER] Starting up...');
+console.log('[WORKER] Creating Redis publisher client...');
+
+const publisher = new IORedis(redisConfig);
 
 const processOrder = async (job: Job) => {
     const { orderId, inputToken, outputToken, amount } = job.data;
     const dexRouter = new MockDexRouter();
 
     try {
-    
+
+        await publisher.publish('order-updates', JSON.stringify({
+            orderId,
+            status: 'routing',
+            message: 'Comparing DEX prices and finding best route.'
+        }));
+
         const bestRoute = await dexRouter.findBestRoute(inputToken, outputToken, amount);
+
+        await publisher.publish('order-updates', JSON.stringify({
+            orderId,
+            status: 'building',
+            message: `Building transaction for route ${bestRoute.name}.`,
+            data: { chosenDex: bestRoute.name, quote: bestRoute.quote }
+        }));
+
         const swapResult = await dexRouter.executeSwap(bestRoute.name, amount);
 
-        const finalData = { 
-            ...swapResult, 
-            executedPrice: bestRoute.quote.price, 
-            finalOutput: bestRoute.quote.estimatedOutput 
+        await publisher.publish('order-updates', JSON.stringify({
+            orderId,
+            status: 'submitted',
+            message: 'Transaction submitted to the network.',
+            data: { txHash: swapResult.txHash }
+        }));
+
+        const finalData = {
+            ...swapResult,
+            executedPrice: bestRoute.quote.price,
+            finalOutput: bestRoute.quote.estimatedOutput
         };
-        
+
         await publisher.publish('order-updates', JSON.stringify({
             orderId, status: 'confirmed', message: 'Transaction successful.',
             data: finalData
         }));
-        
-    
+
         return { jobData: job.data, finalData };
 
-    } catch (error: any) {
+        } catch (error: any) {
         console.error(`[WORKER] FAILED to process order ${orderId}:`, error);
         await publisher.publish('order-updates', JSON.stringify({
             orderId, status: 'failed', message: 'An error occurred during execution.',
@@ -38,6 +65,7 @@ const processOrder = async (job: Job) => {
     }
 };
 
+console.log('[WORKER] Creating BullMQ worker...');
 const worker = new Worker('orders', processOrder, {
     connection: redisConfig,
     concurrency: 10
