@@ -2,6 +2,7 @@ import Fastify from 'fastify';
 import { WebSocketServer, WebSocket } from 'ws';
 import { v4 as uuidv4 } from 'uuid';
 import { createRequire } from 'module';
+import { URLSearchParams } from 'url';
 
 const require = createRequire(import.meta.url);
 const IORedis = require("ioredis");
@@ -20,7 +21,7 @@ server.get('/health', async () => {
 server.get('/api/orders/execute', (request, reply) => { });
 
 server.server.on('upgrade', (request, socket, head) => {
-    if (request.url === '/api/orders/execute') {
+    if (request && request.url && request.url.startsWith('/api/orders/execute')) {
         wss.handleUpgrade(request, socket, head, (ws) => {
             wss.emit('connection', ws, request);
         });
@@ -29,20 +30,46 @@ server.server.on('upgrade', (request, socket, head) => {
     }
 });
 
-wss.on('connection', async (ws: WebSocket) => {
+wss.on('connection', async (ws: WebSocket, request) => {
     const orderId = uuidv4();
-    console.log(`[API] Connection established for new order ${orderId}`);
-    
+    console.log(`[API] Connection for new order ${orderId}`);
+
+    const url = new URL(request.url ?? '/', `http://${request.headers.host ?? 'localhost'}`);
+    const inputToken = url.searchParams.get('inputToken');
+    const outputToken = url.searchParams.get('outputToken');
+    const amountStr = url.searchParams.get('amount');
+    const amount = amountStr ? parseFloat(amountStr) : NaN;
+
+    if (!inputToken || !outputToken || isNaN(amount) || amount <= 0) {
+        console.error(`[API] Invalid order parameters for ${orderId}. Closing connection.`);
+        ws.send(JSON.stringify({
+            orderId,
+            status: 'failed',
+            message: 'Invalid parameters. Please provide inputToken, outputToken, and a valid amount.'
+        }));
+        ws.close();
+        return; // Stop processing
+    }
+
+    console.log(`[API] Order details: ${amount} ${inputToken} -> ${outputToken}`);
     activeConnections.set(orderId, ws);
 
     try {
-        await orderQueue.add('process-order', { orderId });
+        await orderQueue.add('process-order', {
+            orderId,
+            inputToken,
+            outputToken,
+            amount,
+        }, {
+            attempts: 3,
+            backoff: { type: 'exponential', delay: 1000 },
+        });
+
         console.log(`[API] Added job for order ${orderId} to the queue.`);
-        
         ws.send(JSON.stringify({
             orderId,
             status: 'accepted',
-            message: 'Order accepted and queued for processing.'
+            message: `Order for ${amount} ${inputToken} -> ${outputToken} accepted.`
         }));
     } catch (err) {
         console.error(`[API] Failed to add job for order ${orderId}`, err);

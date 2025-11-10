@@ -7,10 +7,11 @@
   "type": "module",
   "main": "index.js",
   "scripts": {
-    "dev:server": "tsx watch src/server.ts",
-    "dev:worker": "tsx watch src/worker.ts",
     "build": "tsc",
-    "start": "node ./dist/server.js"
+    "start:server": "node dist/server.js",
+    "start:worker": "node dist/worker.js",
+    "dev:server": "tsx watch src/server.ts",
+    "dev:worker": "tsx watch src/worker.ts"
   },
   "devDependencies": {
     "@types/node": "^24.10.0",
