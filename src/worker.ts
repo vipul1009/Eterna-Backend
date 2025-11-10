@@ -1,34 +1,17 @@
 import { Worker, Job } from 'bullmq';
 import { redisConfig, publisher } from './redis.js';
 import { MockDexRouter } from './router/mockDexRouter.js';
+import { prisma } from './db.js';
 
 console.log('[WORKER] Starting up...');
 
 const processOrder = async (job: Job) => {
     const { orderId, inputToken, outputToken, amount } = job.data;
     const dexRouter = new MockDexRouter();
-    console.log(`[WORKER] Processing order: ${amount} ${inputToken} -> ${outputToken} (ID: ${orderId})`);
 
     try {
-        await publisher.publish('order-updates', JSON.stringify({
-            orderId, status: 'pending', message: 'Order received and queued.'
-        }));
-        await sleep(1000);
-
-        await publisher.publish('order-updates', JSON.stringify({
-            orderId, status: 'routing', message: 'Comparing DEX prices...'
-        }));
+    
         const bestRoute = await dexRouter.findBestRoute(inputToken, outputToken, amount);
-
-        await publisher.publish('order-updates', JSON.stringify({
-            orderId, status: 'building', message: `Best price found on ${bestRoute.name}. Creating transaction...`,
-            data: { dex: bestRoute.name, price: bestRoute.quote.price, estimatedOutput: bestRoute.quote.estimatedOutput }
-        }));
-        await sleep(1500);
-
-        await publisher.publish('order-updates', JSON.stringify({
-            orderId, status: 'submitted', message: 'Transaction sent to network.'
-        }));
         const swapResult = await dexRouter.executeSwap(bestRoute.name, amount);
 
         const finalData = { 
@@ -36,18 +19,15 @@ const processOrder = async (job: Job) => {
             executedPrice: bestRoute.quote.price, 
             finalOutput: bestRoute.quote.estimatedOutput 
         };
+        
         await publisher.publish('order-updates', JSON.stringify({
             orderId, status: 'confirmed', message: 'Transaction successful.',
             data: finalData
         }));
+        
+    
+        return { jobData: job.data, finalData };
 
-        console.log(`[WORKER] Finished processing order: ${orderId}`);
-        return {
-            orderId,
-            chosenDex: bestRoute.name,
-            executedPrice: finalData.executedPrice,
-            transactionHash: finalData.txHash,
-        };
     } catch (error: any) {
         console.error(`[WORKER] FAILED to process order ${orderId}:`, error);
         await publisher.publish('order-updates', JSON.stringify({
@@ -58,23 +38,52 @@ const processOrder = async (job: Job) => {
     }
 };
 
-const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
-
 const worker = new Worker('orders', processOrder, {
     connection: redisConfig,
     concurrency: 10
 });
-worker.on('completed', (job) => {
-    console.log(`[WORKER] Job ${job.id} has completed!`);
+
+worker.on('completed', async (job, result) => {
+    const { jobData, finalData } = result;
+    console.log(`[WORKER] Job completed for order ${jobData.orderId}. Saving to DB...`);
+    try {
+        await prisma.order.create({
+            data: {
+                id: jobData.orderId,
+                status: 'CONFIRMED',
+                inputToken: jobData.inputToken,
+                outputToken: jobData.outputToken,
+                inputAmount: jobData.amount,
+                executedPrice: finalData.executedPrice,
+                finalOutput: finalData.finalOutput,
+                transactionHash: finalData.txHash,
+            }
+        });
+        console.log(`[DB] Saved CONFIRMED order ${jobData.orderId}`);
+    } catch (e) {
+        console.error(`[DB] FAILED to save confirmed order ${jobData.orderId}`, e);
+    }
 });
+
 worker.on('failed', async (job: any, err) => {
-    console.error(`[WORKER] Job ${job?.id} has FAILED PERMANENTLY after ${job?.attemptsMade} attempts with error: ${err.message}`);
-    
-    const { orderId } = job.data;
-    await publisher.publish('order-updates', JSON.stringify({
-        orderId,
-        status: 'failed',
-        message: `Order failed after multiple retries: ${err.message}`
-    }));
+    const { orderId, inputToken, outputToken, amount } = job.data;
+    console.error(`[WORKER] Job for order ${orderId} has FAILED PERMANENTLY. Saving to DB...`);
+    try {
+        await prisma.order.create({
+            data: {
+                id: orderId,
+                status: 'FAILED',
+                inputToken: inputToken,
+                outputToken: outputToken,
+                inputAmount: amount,
+                failReason: err.message.substring(0, 255),
+            }
+        });
+        console.log(`[DB] Saved FAILED order ${orderId}`);
+    } catch (e) {
+        console.error(`[DB] FAILED to save failed order ${orderId}`, e);
+    }
 });
+
+
 console.log('[WORKER] Worker is listening for jobs on the "orders" queue.');

@@ -1,0 +1,37 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// An enum for the final status of the order for data consistency
+enum OrderStatus {
+  CONFIRMED
+  FAILED
+}
+
+// The model for our historical order records
+model Order {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  status OrderStatus // The final status of the order
+
+  // --- Order Request Data ---
+  inputToken  String
+  outputToken String
+  inputAmount Float
+
+  // --- Execution Result Data (for confirmed orders) ---
+  chosenDex       String? // Optional: will be null if failed before routing
+  executedPrice   Float?  // Optional: final price per unit
+  finalOutput     Float?  // Optional: total amount of output token received
+  transactionHash String? @unique // Optional: but must be unique if it exists
+
+  // --- Post-mortem Analysis Data (for failed orders) ---
+  failReason String?
+}
